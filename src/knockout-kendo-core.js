@@ -16,6 +16,34 @@ ko.kendo.BindingFactory = function() {
 
         var binding = {};
 
+
+        binding.notifyWidgetCreated = function (widget, options, valueAccessor) {
+            if (ko.isObservable(valueAccessor)) {
+                setTimeout(function () {
+                    if (widget.wrapper && $(widget.wrapper).parents('body').length > 0) {
+                        setTimeout(function() {
+                            valueAccessor(widget);
+                            //call bounded timeout
+                            setTimeout(function () {
+                                if (!options._bounded_) {
+                                    widget.trigger("dataBound");
+                                }
+                            }, 100);
+                        }, 100);
+                        return;
+                    }
+                    setTimeout(binding.notifyWidgetCreated(widget, valueAccessor), 100);
+                }, 100);
+            }
+        };
+
+
+        binding.notifyWidgetDestroyed = function (valueAccessor) {
+            if (ko.isObservable(valueAccessor)) {
+                valueAccessor(null);
+            }
+        };
+
         //the binding handler's init function
         binding.init = function(element, valueAccessor, all, vm, context) {
             //step 1: build appropriate options for the widget from values passed in and global options
@@ -24,12 +52,12 @@ ko.kendo.BindingFactory = function() {
             //apply async, so inner templates can finish content needed during widget initialization
             if (options.async === true || (widgetConfig.async === true && options.async !== false)) {
                 setTimeout(function() {
-                    binding.setup(element, options, context);
+                    binding.setup(element, options, context,  all.get('kendoInstance'));
                 }, 0);
                 return;
             }
 
-            binding.setup(element, options, context);
+            binding.setup(element, options, context, all.get('kendoInstance'));
 
             if (options && options.useKOTemplates) {
                 return { controlsDescendantBindings: true };
@@ -37,11 +65,11 @@ ko.kendo.BindingFactory = function() {
         };
 
         //build the core logic for the init function
-        binding.setup = function(element, options, context) {
+        binding.setup = function(element, options, context, widgetAccessor) {
             var widget, $element = $(element);
 
             //step 2: setup templates
-            self.setupTemplates(widgetConfig.templates, options, element, context);
+            var templates = self.setupTemplates(widgetConfig.templates, options, element, context);
 
             //step 3: initialize widget
             widget = self.getWidget(widgetConfig, options, $element);
@@ -57,13 +85,20 @@ ko.kendo.BindingFactory = function() {
                 ko.utils.domNodeDisposal.addDisposeCallback(element, function() {
                     if (widget.element) {
                         if (typeof kendo.destroy === "function") {
-                            kendo.destroy(widget);
+                            kendo.destroy(widget.element);
                         } else {
                             widget.destroy();
                         }
+                        templates.forEach(function(item){
+                            $('#'+item).remove();
+                        });
+
+                        binding.notifyWidgetDestroyed(widgetAccessor)
                     }
                 });
             }
+
+            binding.notifyWidgetCreated(widget, options, widgetAccessor);
         };
 
         binding.options = {}; //global options
@@ -87,34 +122,110 @@ ko.kendo.BindingFactory = function() {
         return options;
     };
 
-    var templateRenderer = function(id, context) {
+    var _increment = 0;
+
+    var templateRenderer = function(id, context, renderedTemplates) {
+
+        //check for template                    
+        var found = false;
+        try{
+            if($('#'+id)[0]){
+                //if is a dom element
+                found = true;
+            }
+        } catch(ex){}
+        
+        if(!found){
+            //else create it
+            var templateId = "kendo-tpl-"+(++_increment);
+            $('body').append("<script id=\""+templateId+"\" type=\"text/html\">"+id+"</script>");
+            id = templateId;
+            renderedTemplates.push(id);
+        }
+
         return function(data) {
-            return ko.renderTemplate(id, context.createChildContext((data._raw && data._raw()) || data));
+            var temp = $('<div>');
+            //ko.renderTemplate(id, context.createChildContext((data._raw && data._raw()) || data), temp);
+            // apply "template" binding to div with specified data
+            ko.applyBindingsToNode(temp[0], { template: { name: id, data: ((data._raw && data._raw()) || data) } });
+            // save inner html of temporary div
+            var html = temp.html();
+            // cleanup temporary node and return the result
+            temp.remove();
+            return html;
         };
     };
 
     //prepare templates, if the widget uses them
     this.setupTemplates = function(templateConfig, options, element, context) {
-        var i, j, option, existingHandler;
+        var _this = this;
+        var i, j, option;
+        var renderedTemplates = [];
 
-        if (templateConfig && options && options.useKOTemplates) {
+        //if (templateConfig && options && options.useKOTemplates) {
+        if (options && options.useKOTemplates) {
+            templateConfig = templateConfig || [];
             //create a function to render each configured template
             for (i = 0, j = templateConfig.length; i < j; i++) {
                 option = templateConfig[i];
                 if (options[option]) {
-                    options[option] = templateRenderer(options[option], context);
+                    var id = options[option];
+                    options[option] = templateRenderer(id, context, renderedTemplates);
                 }
             }
 
             //initialize bindings in dataBound event
-            existingHandler = options.dataBound;
-            options.dataBound = function() {
-                ko.memoization.unmemoizeDomNodeAndDescendants(element);
+            (function (opt, ele) {
+                var existingHandler = null;
+                existingHandler = opt.dataBound;
+                opt._bounded_ = false;
+                //is bounded?
+                opt.dataBound = function () {
+                    //set bounded
+                    try {
+                        ko.memoization.unmemoizeDomNodeAndDescendants(ele);
+                        for (var i = 0; i < ele.childNodes.length; i++) {
+                            _this.KoClearDescendantNodes(ele.childNodes[i]);
+                        }
+                        //bind generated elements
+                        ko.applyBindingsToDescendants(context.$data, ele);
+                    } catch (ex) {
+                        console.warn("Problem on apply template", ex);
+                    }
+
                 if (existingHandler) {
                     existingHandler.apply(this, arguments);
                 }
-            };
+                    opt._bounded_ = true;
+                };
+            })(options, element);
         }
+
+        return renderedTemplates;
+            };
+
+
+    this.KoClearDescendantNodes = function(node) {
+        // First clean this node, where applicable
+        if (typeof(node.hasAttribute) == 'function' && node.hasAttribute('data-bind')) {
+            ko.utils.domNodeDisposal.cleanNode(node);
+        } else {
+            ko.utils.domData.clear(node);
+        }
+        // ... then its descendants, where applicable
+        // Clone the descendants list in case it changes during iteration
+        var descendants = [];
+        if(node.getElementsByTagName) {
+            ko.utils.arrayPushAll(descendants, node.getElementsByTagName("*"));
+            for (var i = 0, j = descendants.length; i < j; i++) {
+                if (typeof (descendants[i].hasAttribute) == 'function' && descendants[i].hasAttribute('data-bind')) {
+                    ko.utils.domNodeDisposal.cleanNode(descendants[i]);
+                } else {
+                    ko.utils.domData.clear(descendants[i]);
+                }
+            }
+        }
+        return node;
     };
 
     //unless the object is a kendo datasource, get a clean object with one level unwrapped
@@ -169,9 +280,12 @@ ko.kendo.BindingFactory = function() {
     };
 
     this.watchOneValue = function(prop, widget, options, widgetConfig, element) {
+
+        var deferred = prop == VALUE || prop == VALUES;
+
         var computed = ko.computed({
             read: function() {
-                var existing, custom,
+                var existing, custom, same = false,
                     action = widgetConfig.watch[prop],
                     value = unwrap(options[prop]),
                     params = widgetConfig.parent ? [element] : []; //child bindings pass element first to APIs
@@ -194,13 +308,22 @@ ko.kendo.BindingFactory = function() {
                     }
 
                     //try to avoid unnecessary updates when the new value matches the current value
-                    if (custom || existing !== value) {
+                    if($.isArray(value) && $.isArray(existing)){
+                        //If the above returns true, both the arrays are same even if the elements are in different order.
+                        //http://stackoverflow.com/questions/1773069/using-jquery-to-compare-two-arrays-of-javascript-objects
+                        same = ($(existing).not(value).length === 0 && $(value).not(existing).length === 0);
+                    } else {
+                        same = existing === value;
+                    }
+
+                    if (custom || !same) {
                         action.apply(widget, params);
                     }
                 }
             },
+            deferEvaluation: deferred,
             disposeWhenNodeIsRemoved: element
-        }).extend({ throttle: (options.throttle || options.throttle === 0) ? options.throttle : 1 });
+        }).extend({ rateLimit: { method: "notifyWhenChangesStop", timeout: (options.throttle || options.throttle === 0) ? options.throttle : 200 } });
 
         //if option is not observable, then dispose up front after executing the logic once
         if (!ko.isObservable(options[prop])) {
@@ -242,7 +365,7 @@ ko.kendo.BindingFactory = function() {
         else if (eventConfig.writeTo && ko.isWriteableObservable(options[eventConfig.writeTo])) {
             handler = function(e) {
                 var propOrValue, value;
-
+                if(e && e.isDefaultPrevented && e.isDefaultPrevented()) return;
                 if (!childProp || !e[childProp] || e[childProp] === element) {
                     propOrValue = eventConfig.value;
                     value = (typeof propOrValue === "string" && this[propOrValue]) ? this[propOrValue](childProp && element) : propOrValue;
@@ -281,6 +404,11 @@ ko.kendo.setDataSource = function(widget, data, options) {
     var existing = kendo.data.ObservableArray.fn.wrap;
     kendo.data.ObservableArray.fn.wrap = function(object) {
         var result = existing.apply(this, arguments);
+        if(result == undefined || result == null){
+            console.warn("Warning, value is null or undefined", object);
+            return result;
+        }
+
         result._raw = function() {
             return object;
         };
