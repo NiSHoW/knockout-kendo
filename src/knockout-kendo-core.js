@@ -93,7 +93,7 @@ ko.kendo.BindingFactory = function() {
                             $('#'+item).remove();
                         });
 
-                        binding.notifyWidgetDestroyed(widgetAccessor)
+                        binding.notifyWidgetDestroyed(widgetAccessor);
                     }
                 });
             }
@@ -404,7 +404,7 @@ ko.kendo.setDataSource = function(widget, data, options) {
     var existing = kendo.data.ObservableArray.fn.wrap;
     kendo.data.ObservableArray.fn.wrap = function(object) {
         var result = existing.apply(this, arguments);
-        if(result == undefined || result == null){
+        if(result === undefined || result === null){
             console.warn("Warning, value is null or undefined", object);
             return result;
         }
